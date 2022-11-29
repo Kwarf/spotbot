@@ -15,7 +15,7 @@ use matrix_sdk::{
 use regex::Regex;
 use rspotify::{
     clients::OAuthClient,
-    model::{Country, FullTrack, Market, PlayableItem, SearchResult, SearchType, TrackId},
+    model::{FullTrack, Market, PlayableItem, SearchResult, SearchType, TrackId},
     prelude::{BaseClient, PlayableId::Track},
     scopes, AuthCodeSpotify, ClientError, Config, Credentials, OAuth,
 };
@@ -119,7 +119,7 @@ async fn on_room_message(
                         .search(
                             args,
                             SearchType::Track,
-                            Some(Market::Country(Country::Sweden)),
+                            Some(Market::FromToken),
                             None,
                             Some(1),
                             None,
