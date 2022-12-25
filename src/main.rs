@@ -166,9 +166,10 @@ async fn on_room_message(
 async fn spotify_login() -> anyhow::Result<AuthCodeSpotify> {
     let creds = Credentials::from_env().unwrap();
     let oauth = OAuth::from_env(scopes!(
-        "user-read-playback-state",
         "user-modify-playback-state",
-        "user-read-currently-playing"
+        "user-read-currently-playing",
+        "user-read-playback-state",
+        "user-read-private"
     ))
     .unwrap();
     let config = Config {
