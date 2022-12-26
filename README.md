@@ -37,15 +37,8 @@ search for.
 
 ```
 kwarf: !q https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT?si=d351ea353d404342
-spotbot: Queued: spotify:track:4cOdK2wGLETKBW3PvgPWqT
+spotbot: Queued: Rick Astley - Never Gonna Give You Up
 ```
-
-Note that the bot does not respond with the name of the song using this method. This is because the
-[command to queue tracks](https://developer.spotify.com/documentation/web-api/reference/#/operations/add-to-queue)
-does not return that (or any) information.
-
-This could be improved in the future by also doing a
-[get-track](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-track) request.
 
 # Running
 

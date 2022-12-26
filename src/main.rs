@@ -1,8 +1,10 @@
 use std::env;
 
 use dotenv::dotenv;
+use lazy_static::lazy_static;
 use matrix_sdk::{
     config::SyncSettings,
+    event_handler::Ctx,
     room::Room,
     ruma::{
         events::room::message::{
@@ -13,176 +15,103 @@ use matrix_sdk::{
     Client,
 };
 use regex::Regex;
-use rspotify::{
-    clients::OAuthClient,
-    model::{FullTrack, Market, PlayableItem, SearchResult, SearchType, TrackId},
-    prelude::{BaseClient, PlayableId::Track},
-    scopes, AuthCodeSpotify, ClientError, Config, Credentials, OAuth,
-};
+use rspotify::model::{FullTrack, TrackId};
+use spotify::SpotifyClient;
 
-fn fmt_track(track: &FullTrack) -> String {
-    format!(
-        "{} - {}",
-        track
-            .artists
-            .iter()
-            .map(|artist| &artist.name)
-            .fold(String::new(), |a, b| a + &b + ", ")
-            .trim_end_matches(", "),
-        track.name
-    )
+mod formatted;
+mod spotify;
+
+lazy_static! {
+    static ref RX_TRACK_URL: Regex =
+        Regex::new(r"https://open.spotify.com/track/([^\?]+)").unwrap();
 }
 
-async fn fmt_err(error: ClientError) -> RoomMessageEventContent {
-    match error {
-        ClientError::Http(http) => match *http {
-            rspotify::http::HttpError::StatusCode(error) => {
-                RoomMessageEventContent::text_markdown(format!(
-                    "```\n{}\n{}\n```",
-                    error.status(),
-                    error.text().await.unwrap()
-                ))
-            }
-            rspotify::http::HttpError::Client(_) => todo!(),
-        },
-        _ => RoomMessageEventContent::text_plain(error.to_string()),
+async fn get_queue_handler(spotify: &SpotifyClient) -> anyhow::Result<RoomMessageEventContent> {
+    let tracks = spotify
+        .get_queue()
+        .await?
+        .iter()
+        .map(|x| formatted::track(x))
+        .fold(String::new(), |a, b| a + &b + "\n");
+
+    Ok(RoomMessageEventContent::text_markdown(format!(
+        "```\n{}\n```",
+        tracks.trim_end()
+    )))
+}
+
+async fn get_track_handler(
+    spotify: &SpotifyClient,
+    id: &str,
+) -> anyhow::Result<RoomMessageEventContent> {
+    match spotify
+        .get_track(TrackId::from_id_or_uri(id).unwrap())
+        .await
+    {
+        Ok(track) => queue_track(&spotify, &track).await,
+        Err(e) => Err(e),
     }
+}
+
+async fn search_track_handler(
+    spotify: &SpotifyClient,
+    search_term: &str,
+) -> anyhow::Result<RoomMessageEventContent> {
+    match spotify.search_track(search_term).await {
+        Ok(Some(track)) => queue_track(spotify, &track).await,
+        Ok(None) => Ok(RoomMessageEventContent::text_plain(format!(
+            "No tracks found matching: \"{}\"",
+            search_term
+        ))),
+        Err(e) => Err(e),
+    }
+}
+
+async fn queue_track(
+    spotify: &SpotifyClient,
+    track: &FullTrack,
+) -> anyhow::Result<RoomMessageEventContent> {
+    spotify.queue_track(track).await?;
+    Ok(RoomMessageEventContent::text_plain(format!(
+        "Queued: {}",
+        formatted::track(track)
+    )))
 }
 
 async fn on_room_message(
     event: OriginalSyncRoomMessageEvent,
     room: Room,
-    spotify: AuthCodeSpotify,
+    spotify: Ctx<SpotifyClient>,
 ) {
-    match room {
-        Room::Joined(room) => {
-            let MessageType::Text(text_content) = event.content.msgtype else {
-                return;
-            };
+    if let Room::Joined(room) = room {
+        let MessageType::Text(message) = event.content.msgtype else {
+            return;
+        };
 
-            if text_content.body == "!q" {
-                println!(
-                    "{} requested the queue, sending...",
-                    event.sender.localpart()
-                );
-                room.send(
-                    match spotify.current_user_queue().await {
-                        Ok(queue) => RoomMessageEventContent::text_markdown(format!(
-                            "```\n{}\n```",
-                            queue
-                                .queue
-                                .iter()
-                                .map(|x| match x {
-                                    PlayableItem::Track(track) => fmt_track(track),
-                                    PlayableItem::Episode(episode) => episode.name.clone(),
-                                })
-                                .fold(String::new(), |a, b| a + &b + "\n")
-                                .trim_end()
-                        )),
-                        Err(err) => fmt_err(err).await,
-                    },
-                    None,
-                )
-                .await
-                .unwrap();
-            }
-
-            if !text_content.body.starts_with("!q ") {
-                return;
-            }
-
-            if let Some(args) = text_content.body.get(3..) {
-                println!("{} is searching for {}...", event.sender.localpart(), args);
-
-                let re = Regex::new(r"https://open.spotify.com/track/([^\?]+)").unwrap();
-                if let Some(c) = re.captures(args) {
-                    if let Ok(id) =
-                        TrackId::from_id_or_uri(c.get(1).map(|x| x.as_str()).unwrap_or(""))
-                    {
-                        room.send(
-                            match spotify.add_item_to_queue(Track(id.clone()), None).await {
-                                Ok(_) => {
-                                    RoomMessageEventContent::text_plain(format!("Queued: {}", id))
-                                }
-                                Err(err) => fmt_err(err).await,
-                            },
-                            None,
-                        )
-                        .await
-                        .unwrap();
-                        return;
-                    }
-                }
-
-                room.send(
-                    match spotify
-                        .search(
-                            args,
-                            SearchType::Track,
-                            Some(Market::FromToken),
-                            None,
-                            Some(1),
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(result) => match result {
-                            SearchResult::Tracks(tracks) => match tracks.items.len() {
-                                0 => RoomMessageEventContent::text_plain(format!(
-                                    "No tracks found matching: \"{}\"",
-                                    args
-                                )),
-                                _ => {
-                                    let track = &tracks.items[0];
-                                    match spotify
-                                        .add_item_to_queue(Track(track.id.clone().unwrap()), None)
-                                        .await
-                                    {
-                                        Ok(_) => RoomMessageEventContent::text_plain(format!(
-                                            "Queued: {}",
-                                            fmt_track(track)
-                                        )),
-                                        Err(err) => fmt_err(err).await,
-                                    }
-                                }
-                            },
-                            _ => RoomMessageEventContent::text_plain(format!(
-                                "No tracks found matching: \"{}\"",
-                                args
-                            )),
-                        },
-                        Err(err) => fmt_err(err).await,
-                    },
-                    None,
-                )
-                .await
-                .unwrap();
-            }
+        if !message.body.starts_with("!q") {
+            return;
         }
-        _ => {}
+
+        let response = if message.body == "!q" {
+            Some(get_queue_handler(&spotify).await)
+        } else if let Some(c) = RX_TRACK_URL.captures(&message.body) {
+            Some(get_track_handler(&spotify, c.get(1).map(|x| x.as_str()).unwrap()).await)
+        } else if let Some(search_term) = message.body.get(3..) {
+            Some(search_track_handler(&spotify, search_term).await)
+        } else {
+            None
+        };
+
+        match response {
+            Some(Ok(message)) => {
+                room.send(message, None).await.unwrap();
+            }
+            Some(Err(e)) => {
+                room.send(formatted::error(e).await, None).await.unwrap();
+            }
+            None => (),
+        }
     }
-}
-
-async fn spotify_login() -> anyhow::Result<AuthCodeSpotify> {
-    let creds = Credentials::from_env().unwrap();
-    let oauth = OAuth::from_env(scopes!(
-        "user-modify-playback-state",
-        "user-read-currently-playing",
-        "user-read-playback-state",
-        "user-read-private"
-    ))
-    .unwrap();
-    let config = Config {
-        token_cached: true,
-        token_refreshing: true,
-        ..Default::default()
-    };
-
-    let spotify = AuthCodeSpotify::with_config(creds, oauth, config);
-    let url = spotify.get_authorize_url(false)?;
-    spotify.prompt_for_token(&url).await?;
-    println!("Connected to Spotify");
-    Ok(spotify)
 }
 
 #[tokio::main]
@@ -194,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     let password = env::var("MATRIX_PASSWORD").expect("MATRIX_PASSWORD not set");
     let room_id = env::var("MATRIX_ROOM_ID").expect("MATRIX_ROOM_ID not set");
     let room_id: &str = &room_id;
-    let spotify = spotify_login().await?;
+    let spotify = spotify::login().await?;
 
     let client = Client::builder()
         .homeserver_url(homeserver_url)
@@ -203,11 +132,11 @@ async fn main() -> anyhow::Result<()> {
 
     client.login_username(&username, &password).send().await?;
 
+    let room_id = <&RoomId>::try_from(room_id).unwrap();
     let response = client.sync_once(SyncSettings::default()).await?;
-    client.add_event_handler(move |ev, room| on_room_message(ev, room, spotify.clone()));
-    client
-        .join_room_by_id(<&RoomId>::try_from(room_id).unwrap())
-        .await?;
+    client.add_event_handler_context(spotify);
+    client.add_room_event_handler(room_id, on_room_message);
+    client.join_room_by_id(room_id).await?;
     println!("Joined {}", room_id);
 
     let settings = SyncSettings::default().token(response.next_batch);
