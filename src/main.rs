@@ -44,26 +44,23 @@ async fn get_track_handler(
     spotify: &SpotifyClient,
     id: &str,
 ) -> anyhow::Result<RoomMessageEventContent> {
-    match spotify
+    let track = spotify
         .get_track(TrackId::from_id_or_uri(id).unwrap())
-        .await
-    {
-        Ok(track) => queue_track(&spotify, &track).await,
-        Err(e) => Err(e),
-    }
+        .await?;
+
+    queue_track(spotify, &track).await
 }
 
 async fn search_track_handler(
     spotify: &SpotifyClient,
     search_term: &str,
 ) -> anyhow::Result<RoomMessageEventContent> {
-    match spotify.search_track(search_term).await {
-        Ok(Some(track)) => queue_track(spotify, &track).await,
-        Ok(None) => Ok(RoomMessageEventContent::text_plain(format!(
+    match spotify.search_track(search_term).await? {
+        Some(track) => queue_track(spotify, &track).await,
+        None => Ok(RoomMessageEventContent::text_plain(format!(
             "No tracks found matching: \"{}\"",
             search_term
         ))),
-        Err(e) => Err(e),
     }
 }
 
@@ -72,6 +69,7 @@ async fn queue_track(
     track: &FullTrack,
 ) -> anyhow::Result<RoomMessageEventContent> {
     spotify.queue_track(track).await?;
+
     Ok(RoomMessageEventContent::text_plain(format!(
         "Queued: {}",
         formatted::track(track)
